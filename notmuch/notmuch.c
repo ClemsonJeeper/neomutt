@@ -66,6 +66,7 @@
 #include "core/lib.h"
 #include "gui/lib.h"
 #include "mutt.h"
+#include "mutt_logging.h"
 #include "lib.h"
 #include "editor/lib.h"
 #include "hcache/lib.h"
@@ -753,8 +754,13 @@ static void progress_setup(struct Mailbox *m)
 
   mdata->oldmsgcount = m->msg_count;
   mdata->ignmsgcount = 0;
+  /* Clear the generic "Reading <path>..." message from mx_mbox_open() so the
+   * message container doesn't keep it visible above the progress bar (which
+   * would produce two lines).  The path is instead shown in the progress
+   * message below, giving a single line: "Reading <path>... <count>". */
+  mutt_clear_error();
   mdata->progress = progress_new(MUTT_PROGRESS_READ, mdata->oldmsgcount);
-  progress_set_message(mdata->progress, _("Reading messages..."));
+  progress_set_message(mdata->progress, _("Reading %s..."), mailbox_path(m));
 }
 
 /**
@@ -2298,6 +2304,10 @@ static enum MxStatus nm_mbox_sync(struct Mailbox *m)
   if (m->verbose)
   {
     /* all is in this function so we don't use data->progress here */
+    /* Clear the generic "Writing <path>..." message from mx_mbox_sync() so the
+     * message container doesn't keep it visible above the progress bar (two
+     * lines).  The path is shown in the progress message below instead. */
+    mutt_clear_error();
     progress = progress_new(MUTT_PROGRESS_WRITE, m->msg_count);
     progress_set_message(progress, _("Writing %s..."), mailbox_path(m));
   }
