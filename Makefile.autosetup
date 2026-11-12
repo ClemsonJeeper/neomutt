@@ -17,8 +17,8 @@ SH?=		sh
 AR=		@AR@
 CC=		@CC@
 CPP=		@CPP@
-CFLAGS=		@CPPFLAGS@ @CFLAGS@ -I. -I@srcdir@ -Wall $(EXTRA_CFLAGS)
-LDFLAGS=	@LDFLAGS@ $(EXTRA_LDFLAGS)
+CFLAGS=		@CPPFLAGS@ @CFLAGS@ -I. -I@srcdir@ -Wall -pthread $(EXTRA_CFLAGS)
+LDFLAGS=	@LDFLAGS@ -pthread $(EXTRA_LDFLAGS)
 EXEEXT=		@EXEEXT@
 LIBS=		@LIBS@
 @if ENABLE_NLS
@@ -798,7 +798,7 @@ $(PWD)/nntp:
 LIBNOTMUCH=	libnotmuch.a
 LIBNOTMUCHOBJS=	notmuch/adata.o notmuch/complete.o notmuch/config.o \
 		notmuch/db.o notmuch/edata.o notmuch/mdata.o notmuch/module.o \
-		notmuch/notmuch.o notmuch/query.o notmuch/tag.o
+		notmuch/notmuch.o notmuch/query.o notmuch/stats_async.o notmuch/tag.o
 CLEANFILES+=	$(LIBNOTMUCH) $(LIBNOTMUCHOBJS)
 ALLOBJS+=	$(LIBNOTMUCHOBJS)
 

@@ -32,6 +32,7 @@
 #include "mutt/lib.h"
 #include "config/lib.h"
 #include "core/lib.h"
+#include "lib.h"
 #include "module_data.h"
 
 extern struct ConfigDef NotmuchVars[];
@@ -105,6 +106,8 @@ static void notmuch_gui_cleanup(struct NeoMutt *n)
 static bool notmuch_cleanup(struct NeoMutt *n, void *data)
 {
   struct NotmuchModuleData *mod_data = data;
+
+  nm_stats_async_shutdown();
 
   notify_free(&mod_data->notify);
 

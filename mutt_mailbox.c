@@ -40,6 +40,9 @@
 #include "postpone/lib.h"
 #include "muttlib.h"
 #include "mx.h"
+#ifdef USE_NOTMUCH
+#include "notmuch/lib.h"
+#endif
 
 static time_t MailboxTime = 0; ///< last time we started checking for mail
 static time_t MailboxStatsTime = 0; ///< last time we check performed mail_check_stats
@@ -171,6 +174,13 @@ int mutt_mailbox_check(struct Mailbox *m_cur, CheckStatsFlags flags)
   if (ARRAY_EMPTY(&NeoMutt->accounts)) // fast return if there are no mailboxes
     return 0;
 
+#ifdef USE_NOTMUCH
+  // Apply any Notmuch stats computed by the background worker.  This is cheap
+  // and runs every poll so counts refresh promptly, even inside the throttle
+  // window below.
+  nm_stats_async_apply();
+#endif
+
   if (flags & MUTT_MAILBOX_CHECK_POSTPONED)
     mutt_update_num_postponed();
 
@@ -204,6 +214,11 @@ int mutt_mailbox_check(struct Mailbox *m_cur, CheckStatsFlags flags)
 
   struct MailboxArray ma = neomutt_mailboxes_get(NeoMutt, MUTT_MAILBOX_ANY);
   struct Mailbox **mp = NULL;
+#ifdef USE_NOTMUCH
+  struct Mailbox *nm_jobs[512];
+  int nm_njobs = 0;
+  const bool nm_async = nm_stats_async_available();
+#endif
   ARRAY_FOREACH(mp, &ma)
   {
     struct Mailbox *m = *mp;
@@ -216,12 +231,38 @@ int mutt_mailbox_check(struct Mailbox *m_cur, CheckStatsFlags flags)
     {
       m_flags |= MUTT_MAILBOX_CHECK_STATS;
     }
+
+#ifdef USE_NOTMUCH
+    if (nm_async && (m->type == MUTT_NOTMUCH))
+    {
+      // Notmuch stats are expensive on a large database, so run them on the
+      // background worker instead of blocking the UI here.  The counts are
+      // applied later by nm_stats_async_apply().  The currently open mailbox is
+      // handled by the inline check in the index, so skip it here (mirroring
+      // the is_same_mailbox() behaviour of the synchronous path).
+      if ((m_flags & MUTT_MAILBOX_CHECK_STATS) && (m != m_cur) &&
+          (nm_njobs < (int) countof(nm_jobs)))
+      {
+        nm_jobs[nm_njobs++] = m;
+      }
+      if (m->has_new)
+        MailboxCount++;
+      m->first_check_stats_done = true;
+      continue;
+    }
+#endif
+
     mailbox_check(m_cur, m, &st_cur, m_flags);
     if (m->has_new)
       MailboxCount++;
     m->first_check_stats_done = true;
   }
   ARRAY_FREE(&ma); // Clean up the ARRAY, but not the Mailboxes
+
+#ifdef USE_NOTMUCH
+  if (nm_async && (nm_njobs > 0) && !nm_stats_async_busy())
+    nm_stats_async_dispatch(nm_jobs, nm_njobs);
+#endif
 
   return MailboxCount;
 }

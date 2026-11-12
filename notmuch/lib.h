@@ -71,4 +71,10 @@ int   nm_record_message          (struct Mailbox *m, char *path, struct Email *e
 int   nm_update_filename         (struct Mailbox *m, const char *old_file, const char *new_file, struct Email *e);
 char *nm_url_from_query          (struct Mailbox *m, char *buf, size_t buflen);
 
+int   nm_stats_async_apply       (void);
+bool  nm_stats_async_available   (void);
+bool  nm_stats_async_busy        (void);
+bool  nm_stats_async_dispatch    (struct Mailbox **mboxes, int count);
+void  nm_stats_async_shutdown    (void);
+
 #endif /* MUTT_NOTMUCH_LIB_H */
