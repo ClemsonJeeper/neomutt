@@ -409,7 +409,14 @@ int dlg_pager(struct PagerView *pview)
     {
       int oldcount = shared->mailbox->msg_count;
       /* check for new mail */
+      const uint64_t perf_t0_check = mutt_date_now_ms();
       enum MxStatus check = mx_mbox_check(shared->mailbox);
+      const uint64_t perf_dt_check = mutt_date_now_ms() - perf_t0_check;
+      if (perf_dt_check >= 50)
+      {
+        mutt_debug(LL_DEBUG1, "PERF: pager mx_mbox_check() took %llu ms (check=%d)\n",
+                   (unsigned long long) perf_dt_check, check);
+      }
       if (check == MX_STATUS_ERROR)
       {
         if (!shared->mailbox || buf_is_empty(&shared->mailbox->pathbuf))

@@ -1198,7 +1198,14 @@ struct Mailbox *dlg_index(struct MuttWindow *dlg, struct Mailbox *m_init)
       /* check for new mail in the mailbox.  If nonzero, then something has
        * changed about the file (either we got new mail or the file was
        * modified underneath us.) */
-      enum MxStatus check = mx_mbox_check(shared->mailbox);
+      const uint64_t perf_t0_check = mutt_date_now_ms();
+      const enum MxStatus check = mx_mbox_check(shared->mailbox);
+      const uint64_t perf_dt_check = mutt_date_now_ms() - perf_t0_check;
+      if (perf_dt_check >= 50)
+      {
+        mutt_debug(LL_DEBUG1, "PERF: mx_mbox_check() took %llu ms (check=%d)\n",
+                   (unsigned long long) perf_dt_check, check);
+      }
 
       if (check == MX_STATUS_ERROR)
       {
@@ -1262,7 +1269,10 @@ struct Mailbox *dlg_index(struct MuttWindow *dlg, struct Mailbox *m_init)
 
         bool verbose = shared->mailbox->verbose;
         shared->mailbox->verbose = false;
+        const uint64_t perf_t0_upd = mutt_date_now_ms();
         update_index(priv->menu, shared->mailbox_view, check, priv->oldcount, shared);
+        mutt_debug(LL_DEBUG1, "PERF: update_index() took %llu ms\n",
+                   (unsigned long long) (mutt_date_now_ms() - perf_t0_upd));
         shared->mailbox->verbose = verbose;
         priv->menu->max = shared->mailbox->vcount;
         menu_queue_redraw(priv->menu, MENU_REDRAW_FULL);
