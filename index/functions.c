@@ -939,6 +939,34 @@ static int op_display_address(struct IndexFunctionData *fdata, const struct KeyE
 }
 
 /**
+ * struct MailboxWatch - Track changes to a Mailbox while a message is displayed
+ */
+struct MailboxWatch
+{
+  struct Mailbox *m; ///< Mailbox being watched (NULL if it was deleted)
+  bool changed;      ///< The Email list was changed
+};
+
+/**
+ * display_mailbox_observer - Notification that a Mailbox has changed - Implements ::observer_t - @ingroup observer_api
+ */
+static int display_mailbox_observer(struct NotifyCallback *nc)
+{
+  if (nc->event_type != NT_MAILBOX)
+    return 0;
+  if (!nc->global_data)
+    return -1;
+
+  struct MailboxWatch *watch = nc->global_data;
+  if (nc->event_subtype == NT_MAILBOX_INVALID)
+    watch->changed = true;
+  else if (nc->event_subtype == NT_MAILBOX_DELETE)
+    watch->m = NULL;
+
+  return 0;
+}
+
+/**
  * op_display_message - Display a message - Implements ::index_function_t - @ingroup index_function_api
  *
  * This function handles:
@@ -1000,6 +1028,11 @@ static int op_display_message(struct IndexFunctionData *fdata, const struct KeyE
   const int index = menu_get_index(priv->menu);
   index_shared_data_set_email(shared, mutt_get_virt_email(shared->mailbox, index));
 
+  struct MailboxWatch watch = { shared->mailbox, false };
+  const int old_msg_count = shared->mailbox ? shared->mailbox->msg_count : 0;
+  if (watch.m)
+    notify_observer_add(watch.m->notify, NT_MAILBOX, display_mailbox_observer, &watch);
+
   const char *const c_pager = pager_get_pager(fdata->n->sub);
   if (c_pager)
   {
@@ -1010,6 +1043,9 @@ static int op_display_message(struct IndexFunctionData *fdata, const struct KeyE
     op = mutt_display_message(priv->win_index, shared);
   }
 
+  if (watch.m)
+    notify_observer_remove(watch.m->notify, display_mailbox_observer, &watch);
+
   window_set_focus(priv->win_index);
   if (op < OP_NULL)
   {
@@ -1017,7 +1053,11 @@ static int op_display_message(struct IndexFunctionData *fdata, const struct KeyE
     return FR_ERROR;
   }
 
-  if (shared->mailbox)
+  /* Re-sorting a large mailbox is expensive, so only do it if the pager left
+   * something that needs it: the Mailbox changed under us, or a sort-related
+   * setting changed. */
+  if (shared->mailbox && (watch.changed || (shared->mailbox->msg_count != old_msg_count) ||
+                          OptNeedResort || OptResortInit || OptNeedRescore || OptSortSubthreads))
   {
     update_index(priv->menu, shared->mailbox_view, MX_STATUS_NEW_MAIL,
                  shared->mailbox->msg_count, shared);
