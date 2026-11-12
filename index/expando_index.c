@@ -384,6 +384,10 @@ static long email_attachment_count(const struct ExpandoNode *node, void *data, M
 
   struct Mailbox *m = efi->mailbox;
 
+  // The count is cached; don't open the message file on every repaint
+  if (e->attach_valid)
+    return e->attach_total;
+
   struct Message *msg = mx_msg_open(m, e);
   if (!msg)
     return 0;
