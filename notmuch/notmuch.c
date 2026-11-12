@@ -527,13 +527,14 @@ static int update_email_tags(struct Email *e, notmuch_message_t *msg)
 }
 
 /**
- * update_message_path - Set the path for a message
- * @param e    Email
- * @param path Path
+ * update_message_path_opt - Set the path for a message
+ * @param e       Email
+ * @param path    Path
+ * @param reparse Re-read the message from disk (false if @a e was just parsed from @a path)
  * @retval 0 Success
  * @retval 1 Failure
  */
-static int update_message_path(struct Email *e, const char *path)
+static int update_message_path_opt(struct Email *e, const char *path, bool reparse)
 {
   struct NmEmailData *edata = nm_edata_get(e);
   if (!edata)
@@ -546,6 +547,17 @@ static int update_message_path(struct Email *e, const char *path)
       (mutt_strn_equal(p - 3, "cur", 3) || mutt_strn_equal(p - 3, "new", 3) ||
        mutt_strn_equal(p - 3, "tmp", 3)))
   {
+    /* Bail out before touching the Email if the file no longer exists.  This
+     * path can be stale - notmuch may report an old filename, or (with the
+     * background check) the file may have been renamed by a <sync-mailbox>
+     * between enumeration and apply.  Reparsing a missing file used to free
+     * e->env / e->body and leave them NULL, crashing later during sort. */
+    if (reparse && (access(path, F_OK) != 0))
+    {
+      mutt_debug(LL_DEBUG2, "nm: path gone, keeping existing email: %s\n", path);
+      return 1;
+    }
+
     edata->type = MUTT_MAILDIR;
 
     FREE(&e->path);
@@ -565,18 +577,34 @@ static int update_message_path(struct Email *e, const char *path)
 
     mutt_debug(LL_DEBUG2, "nm: folder='%s', file='%s'\n", edata->folder, e->path);
 
+    if (!reparse)
+    {
+      // The Email was parsed (or fetched from the header cache) from this very
+      // file, so there's nothing to re-read.  Only the flags in the filename
+      // need applying.
+      maildir_parse_flags(e, path);
+      return 0;
+    }
+
     // We _might_ be looking at a different file (with the same Message-ID)
     // so reparse it from scratch.
 
     // Preserve the Message-ID as it's used in the Email HashTable
     mutt_debug(LL_DEBUG1, "nm: reparse the message\n");
-    char *message_id = e->env->message_id;
-    e->env->message_id = NULL;
+    char *message_id = e->env ? e->env->message_id : NULL;
+    if (e->env)
+      e->env->message_id = NULL;
 
     mutt_body_free(&e->body);
     mutt_env_free(&e->env);
     if (!maildir_parse_message(path, e->old, e))
+    {
+      /* The file vanished between the check above and here (TOCTOU).  Restore
+       * a minimal envelope so the Email is never left with a NULL env. */
+      e->env = mutt_env_new();
+      e->env->message_id = message_id;
       return 1;
+    }
 
     ASSERT(e->body);
     ASSERT(e->env);
@@ -589,6 +617,18 @@ static int update_message_path(struct Email *e, const char *path)
   }
 
   return 1;
+}
+
+/**
+ * update_message_path - Set the path for a message and re-read it from disk
+ * @param e    Email
+ * @param path Path
+ * @retval 0 Success
+ * @retval 1 Failure
+ */
+static int update_message_path(struct Email *e, const char *path)
+{
+  return update_message_path_opt(e, path, true);
 }
 
 /**
@@ -670,7 +710,8 @@ static int init_email(struct Email *e, const char *path, notmuch_message_t *msg)
     FREE(&nm_msg_id);
   }
 
-  if (update_message_path(e, path) != 0)
+  // The Email came from this exact path, so it needn't be re-parsed
+  if (update_message_path_opt(e, path, false) != 0)
     return -1;
 
   update_email_tags(e, msg);
@@ -802,6 +843,8 @@ static void append_message(struct HeaderCache *hc, struct Mailbox *m,
 
 #ifdef USE_HCACHE
   e = hcache_fetch_email(hc, path, mutt_str_len(path), 0).email;
+  if (e && (access(path, F_OK) != 0))
+    email_free(&e); // The file has moved; take the slow path to find it
   if (!e)
 #endif
   {
