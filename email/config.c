@@ -125,8 +125,14 @@ struct ConfigDef EmailVars[] = {
   { "score_threshold_read", DT_NUMBER, -1, 0, NULL,
     "Messages with a lower score will be automatically marked read"
   },
+  { "show_attachment_info", DT_BOOL, true, 0, NULL,
+    "Show attachment and autoview informational banners in the pager"
+  },
   { "show_multipart_alternative", DT_STRING, 0, 0, multipart_validator,
     "How to display 'multipart/alternative' MIME parts"
+  },
+  { "show_sorting_notice", DT_BOOL, true, 0, NULL,
+    "Show the 'Sorting mailbox...' message while sorting"
   },
   { "reverse_alias", DT_BOOL, false, 0, NULL,
     "Display the alias in the index, rather than the message's sender"

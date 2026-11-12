@@ -4373,14 +4373,6 @@
 ** If not specified, then the user's login shell from \fC/etc/passwd\fP is used.
 */
 
-{ "show_multipart_alternative", DT_STRING, 0 },
-/*
-** .pp
-** When \fIset\fP to \fCinfo\fP, the multipart/alternative information is shown.
-** When \fIset\fP to \fCinline\fP, all of the alternatives are displayed.
-** When not set, the default behavior is to show only the chosen alternative.
-*/
-
 { "show_new_news", DT_BOOL, true },
 /*
 ** .pp
@@ -4395,6 +4387,44 @@
 ** .pp
 ** If \fIset\fP, only subscribed newsgroups that contain unread articles
 ** will be displayed in browser.
+*/
+
+{ "show_attachment_info", DT_BOOL, true },
+/*
+** .pp
+** If \fIset\fP, NeoMutt shows attachment and autoview informational banners,
+** e.g. attachment headings and the autoview command banner in the pager.
+** If \fIunset\fP, these banners are suppressed.
+*/
+
+{ "show_mailbox_modification_notice", DT_BOOL, true },
+/*
+** .pp
+** If \fIset\fP, NeoMutt warns when the current mailbox has been externally
+** modified. If \fIunset\fP, those warnings are suppressed.
+*/
+
+{ "show_new_mail_notice", DT_BOOL, true },
+/*
+** .pp
+** If \fIset\fP, NeoMutt shows the "New mail in this mailbox" message when new
+** mail arrives in the open mailbox. If \fIunset\fP, that message is suppressed
+** (new mail still appears in the index).
+*/
+
+{ "show_multipart_alternative", DT_STRING, 0 },
+/*
+** .pp
+** When \fIset\fP to \fCinfo\fP, the multipart/alternative information is shown.
+** When \fIset\fP to \fCinline\fP, all of the alternatives are displayed.
+** When not set, the default behavior is to show only the chosen alternative.
+*/
+
+{ "show_sorting_notice", DT_BOOL, true },
+/*
+** .pp
+** If \fIset\fP, NeoMutt shows the "Sorting mailbox..." message while sorting
+** the index. If \fIunset\fP, that message is suppressed.
 */
 
 { "sidebar_component_depth", DT_NUMBER, 0 },

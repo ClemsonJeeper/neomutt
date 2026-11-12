@@ -570,8 +570,9 @@ static int autoview_handler(struct Body *b_email, struct State *state)
 
     /* mailcap_expand_command returns 0 if the file is required */
     bool piped = mailcap_expand_command(b_email, buf_string(tempfile), type, cmd);
+    const bool c_show_attachment_info = cs_subset_bool(NeoMutt->sub, "show_attachment_info");
 
-    if (state->flags & STATE_DISPLAY)
+    if ((state->flags & STATE_DISPLAY) && c_show_attachment_info)
     {
       state_mark_attach(state);
       state_printf(state, _("[-- Autoview using %s --]\n"), buf_string(cmd));
@@ -1280,25 +1281,29 @@ static int multipart_handler(struct Body *b_email, struct State *state)
 
   const bool c_weed = cs_subset_bool(NeoMutt->sub, "weed");
   const bool c_include_only_first = cs_subset_bool(NeoMutt->sub, "include_only_first");
+  const bool c_show_attachment_info = cs_subset_bool(NeoMutt->sub, "show_attachment_info");
 
   for (p = b->parts, count = 1; p; p = p->next, count++)
   {
     if (state->flags & STATE_DISPLAY)
     {
-      state_mark_attach(state);
-      if (p->description || p->filename || p->form_name)
+      if (c_show_attachment_info)
       {
-        /* L10N: %s is the attachment description, filename or form_name. */
-        state_printf(state, _("[-- Attachment #%d: %s --]\n"), count,
-                     p->description ? p->description :
-                     p->filename    ? p->filename :
-                                      p->form_name);
+        state_mark_attach(state);
+        if (p->description || p->filename || p->form_name)
+        {
+          /* L10N: %s is the attachment description, filename or form_name. */
+          state_printf(state, _("[-- Attachment #%d: %s --]\n"), count,
+                       p->description ? p->description :
+                       p->filename    ? p->filename :
+                                        p->form_name);
+        }
+        else
+        {
+          state_printf(state, _("[-- Attachment #%d --]\n"), count);
+        }
+        print_part_line(state, p, 0);
       }
-      else
-      {
-        state_printf(state, _("[-- Attachment #%d --]\n"), count);
-      }
-      print_part_line(state, p, 0);
       if (c_weed)
       {
         state_putc(state, '\n');

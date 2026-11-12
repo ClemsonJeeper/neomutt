@@ -1214,10 +1214,14 @@ struct Mailbox *dlg_index(struct MuttWindow *dlg, struct Mailbox *m_init)
       else if ((check == MX_STATUS_NEW_MAIL) || (check == MX_STATUS_REOPENED) ||
                (check == MX_STATUS_FLAGS))
       {
+        const bool c_show_mailbox_modification_notice =
+            cs_subset_bool(shared->sub, "show_mailbox_modification_notice");
+
         /* notify the user of new mail */
         if (check == MX_STATUS_REOPENED)
         {
-          mutt_error(_("Mailbox was externally modified.  Flags may be wrong."));
+          if (c_show_mailbox_modification_notice)
+            mutt_error(_("Mailbox was externally modified.  Flags may be wrong."));
         }
         else if (check == MX_STATUS_NEW_MAIL)
         {
@@ -1226,7 +1230,10 @@ struct Mailbox *dlg_index(struct MuttWindow *dlg, struct Mailbox *m_init)
             const struct Email *e = shared->mailbox->emails[i];
             if (e && !e->read && !e->old)
             {
-              mutt_message(_("New mail in this mailbox"));
+              const bool c_show_new_mail_notice =
+                  cs_subset_bool(shared->sub, "show_new_mail_notice");
+              if (c_show_new_mail_notice)
+                mutt_message(_("New mail in this mailbox"));
               const bool c_beep_new = cs_subset_bool(shared->sub, "beep_new");
               if (c_beep_new)
                 mutt_beep(true);
@@ -1246,7 +1253,8 @@ struct Mailbox *dlg_index(struct MuttWindow *dlg, struct Mailbox *m_init)
         }
         else if (check == MX_STATUS_FLAGS)
         {
-          mutt_message(_("Mailbox was externally modified"));
+          if (c_show_mailbox_modification_notice)
+            mutt_message(_("Mailbox was externally modified"));
         }
 
         /* avoid the message being overwritten by mailbox */

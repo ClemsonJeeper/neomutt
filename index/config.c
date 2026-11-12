@@ -119,6 +119,12 @@ struct ConfigDef IndexVars[] = {
   { "read_only", DT_BOOL, false, 0, NULL,
     "Open folders in read-only mode"
   },
+  { "show_mailbox_modification_notice", DT_BOOL, true, 0, NULL,
+    "Warn when the current mailbox is externally modified"
+  },
+  { "show_new_mail_notice", DT_BOOL, true, 0, NULL,
+    "Show the 'New mail in this mailbox' message when new mail arrives"
+  },
   // L10N: $status_format default format
   { "status_format", DT_EXPANDO|D_L10N_STRING, IP N_("-%r-NeoMutt: %D [Msgs:%<M?%M/>%m%<n? New:%n>%<o? Old:%o>%<d? Del:%d>%<F? Flag:%F>%<t? Tag:%t>%<p? Post:%p>%<b? Inc:%b>%<l? %l>]---(%<T?%T/>%s/%S)-%>-(%P)---"), IP &StatusFormatDef, NULL,
     "printf-like format string for the index's status line"

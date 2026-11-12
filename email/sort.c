@@ -378,7 +378,11 @@ void mutt_sort_headers(struct MailboxView *mv, bool init)
   }
 
   if (m->verbose)
-    mutt_message(_("Sorting mailbox..."));
+  {
+    const bool c_show_sorting_notice = cs_subset_bool(NeoMutt->sub, "show_sorting_notice");
+    if (c_show_sorting_notice)
+      mutt_message(_("Sorting mailbox..."));
+  }
 
   const bool c_score = cs_subset_bool(NeoMutt->sub, "score");
   if (OptNeedRescore && c_score)
