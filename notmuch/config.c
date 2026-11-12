@@ -92,6 +92,9 @@ struct ConfigDef NotmuchVars[] = {
   { "nm_flagged_tag", DT_STRING, IP "flagged", 0, NULL,
     "(notmuch) Tag to use for flagged messages"
   },
+  { "nm_folder_cache_messages", DT_LONG|D_INTEGER_NOT_NEGATIVE, 150000, 0, NULL,
+    "(notmuch) Total number of messages to keep cached in memory for virtual folders you have left"
+  },
   { "nm_open_timeout", DT_NUMBER|D_INTEGER_NOT_NEGATIVE, 5, 0, NULL,
     "(notmuch) Database timeout"
   },

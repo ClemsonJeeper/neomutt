@@ -798,7 +798,8 @@ $(PWD)/nntp:
 LIBNOTMUCH=	libnotmuch.a
 LIBNOTMUCHOBJS=	notmuch/adata.o notmuch/complete.o notmuch/config.o \
 		notmuch/db.o notmuch/edata.o notmuch/mdata.o notmuch/module.o \
-		notmuch/notmuch.o notmuch/query.o notmuch/stats_async.o notmuch/tag.o
+		notmuch/notmuch.o notmuch/query.o notmuch/stats_async.o \
+		notmuch/check_async.o notmuch/tag.o
 CLEANFILES+=	$(LIBNOTMUCH) $(LIBNOTMUCHOBJS)
 ALLOBJS+=	$(LIBNOTMUCHOBJS)
 

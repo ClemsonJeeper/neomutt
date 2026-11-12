@@ -791,6 +791,9 @@ enum MxStatus mx_mbox_close(struct Mailbox *m)
       mutt_message(_("Mailbox is unchanged"));
     if ((m->type == MUTT_MBOX) || (m->type == MUTT_MMDF))
       mbox_reset_atime(m, NULL);
+#ifdef USE_NOTMUCH
+    nm_folder_cache_park(m);
+#endif
     mx_fastclose_mailbox(m, false);
     rc = MX_STATUS_OK;
     goto cleanup;
@@ -881,6 +884,9 @@ enum MxStatus mx_mbox_close(struct Mailbox *m)
     }
   }
 
+#ifdef USE_NOTMUCH
+  nm_folder_cache_park(m);
+#endif
   mx_fastclose_mailbox(m, false);
 
   rc = MX_STATUS_OK;
@@ -1109,6 +1115,20 @@ enum MxStatus mx_mbox_check(struct Mailbox *m)
   if (!m || !m->mx_ops)
     return MX_STATUS_ERROR;
 
+  enum MxStatus rc = MX_STATUS_OK;
+
+#ifdef USE_NOTMUCH
+  /* Notmuch checks can take seconds on a large vfolder, so never run them on
+   * the UI thread.  This does its own $mail_check throttling. */
+  if ((m->type == MUTT_NOTMUCH) && nm_check_async_available())
+  {
+    rc = nm_check_nonblocking(m);
+    if ((rc == MX_STATUS_NEW_MAIL) || (rc == MX_STATUS_REOPENED))
+      mailbox_changed(m, NT_MAILBOX_INVALID);
+    return rc;
+  }
+#endif
+
   const short c_mail_check = cs_subset_number(NeoMutt->sub, "mail_check");
 
   time_t t = mutt_date_now();
@@ -1117,7 +1137,7 @@ enum MxStatus mx_mbox_check(struct Mailbox *m)
 
   m->last_checked = t;
 
-  enum MxStatus rc = m->mx_ops->mbox_check(m);
+  rc = m->mx_ops->mbox_check(m);
   if ((rc == MX_STATUS_NEW_MAIL) || (rc == MX_STATUS_REOPENED))
   {
     mailbox_changed(m, NT_MAILBOX_INVALID);

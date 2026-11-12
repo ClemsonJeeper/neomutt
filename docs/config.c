@@ -2889,6 +2889,18 @@
 ** flags.
 */
 
+{ "nm_folder_cache_messages", DT_LONG, 150000 },
+/*
+** .pp
+** When you leave a notmuch virtual folder, NeoMutt can keep its messages in
+** memory so that returning to it is instant.  The folder is shown immediately
+** and then brought up to date in the background.  This variable is the total
+** number of messages kept this way, across all the folders you have left; the
+** least recently used folders are discarded first.  A folder with more
+** messages than this is never cached.  Each message uses roughly 5KB.  Set it
+** to 0 to disable the cache.
+*/
+
 { "nm_open_timeout", DT_NUMBER, 5 },
 /*
 ** .pp

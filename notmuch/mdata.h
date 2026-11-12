@@ -23,6 +23,8 @@
 #ifndef MUTT_NOTMUCH_MDATA_H
 #define MUTT_NOTMUCH_MDATA_H
 
+#include <stdbool.h>
+#include <stdint.h>
 #include <time.h>
 #include "query.h"
 
@@ -42,6 +44,9 @@ struct NmMboxData
   int oldmsgcount;               ///< Old message count
   int ignmsgcount;               ///< Ignored messages
   struct timespec mtime;         ///< Time Mailbox was last changed
+  uint64_t check_hash;           ///< Hash of the last applied background check
+  bool have_check_hash;          ///< check_hash is valid
+  bool reconcile;                ///< Mailbox was restored from the folder cache; next check must prune it
 };
 
 void                  nm_mdata_free(void **ptr);

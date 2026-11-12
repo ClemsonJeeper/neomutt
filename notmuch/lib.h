@@ -77,4 +77,11 @@ bool  nm_stats_async_busy        (void);
 bool  nm_stats_async_dispatch    (struct Mailbox **mboxes, int count);
 void  nm_stats_async_shutdown    (void);
 
+void  nm_folder_cache_park       (struct Mailbox *m);
+void  nm_folder_cache_shutdown   (void);
+
+bool             nm_check_async_available(void);
+void             nm_check_async_shutdown (void);
+enum MxStatus    nm_check_nonblocking    (struct Mailbox *m);
+
 #endif /* MUTT_NOTMUCH_LIB_H */

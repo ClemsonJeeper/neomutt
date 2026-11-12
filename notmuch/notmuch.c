@@ -2098,6 +2098,279 @@ static bool nm_ac_add(struct Account *a, struct Mailbox *m)
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Folder cache
+//
+// When a visible Notmuch folder is closed (and its changes synced), its Emails
+// are parked here instead of being freed.  Re-opening the folder then restores
+// them instantly; the next background check (see nm_apply_check_snapshot())
+// brings them up to date and prunes messages that no longer match the query.
+
+/// Bumped on every local sync/tag commit, so older background snapshots can be discarded
+static unsigned int NmLocalGen = 0;
+
+#define NM_CACHE_SLOTS 32
+
+/**
+ * struct NmFolderCache - Emails of a closed Notmuch folder
+ */
+struct NmFolderCache
+{
+  char *url;              ///< Mailbox path (the Notmuch URL); NULL if the slot is free
+  struct Email **emails;  ///< Parked Emails
+  int count;              ///< Number of Emails
+  uint64_t used;          ///< LRU stamp
+};
+
+static struct NmFolderCache NmCache[NM_CACHE_SLOTS]; ///< Parked folders
+static uint64_t NmCacheClock = 0;                    ///< LRU clock
+
+/**
+ * nm_cache_drop - Free a cache slot and its Emails
+ * @param c Slot
+ */
+static void nm_cache_drop(struct NmFolderCache *c)
+{
+  if (!c || !c->url)
+    return;
+
+  for (int i = 0; i < c->count; i++)
+    email_free(&c->emails[i]);
+
+  FREE(&c->emails);
+  FREE(&c->url);
+  c->count = 0;
+  c->used = 0;
+}
+
+/**
+ * nm_cache_find - Find the cache slot for a folder
+ * @param url Mailbox path
+ * @retval ptr Slot, or NULL
+ */
+static struct NmFolderCache *nm_cache_find(const char *url)
+{
+  for (int i = 0; i < NM_CACHE_SLOTS; i++)
+  {
+    if (NmCache[i].url && mutt_str_equal(NmCache[i].url, url))
+      return &NmCache[i];
+  }
+  return NULL;
+}
+
+/**
+ * nm_cache_total - Count the Emails in the cache
+ * @retval num Number of Emails
+ */
+static long nm_cache_total(void)
+{
+  long total = 0;
+  for (int i = 0; i < NM_CACHE_SLOTS; i++)
+  {
+    if (NmCache[i].url)
+      total += NmCache[i].count;
+  }
+  return total;
+}
+
+/**
+ * nm_cache_evict_oldest - Drop the least recently used folder
+ * @retval true A folder was dropped
+ */
+static bool nm_cache_evict_oldest(void)
+{
+  struct NmFolderCache *oldest = NULL;
+  for (int i = 0; i < NM_CACHE_SLOTS; i++)
+  {
+    if (NmCache[i].url && (!oldest || (NmCache[i].used < oldest->used)))
+      oldest = &NmCache[i];
+  }
+
+  if (!oldest)
+    return false;
+
+  mutt_debug(LL_DEBUG1, "nm: folder cache evicting %s (%d emails)\n", oldest->url, oldest->count);
+  nm_cache_drop(oldest);
+  return true;
+}
+
+/**
+ * nm_folder_cache_shutdown - Free the folder cache
+ */
+void nm_folder_cache_shutdown(void)
+{
+  for (int i = 0; i < NM_CACHE_SLOTS; i++)
+    nm_cache_drop(&NmCache[i]);
+}
+
+/**
+ * nm_folder_cache_park - Keep a closing folder's Emails for later
+ * @param m Mailbox
+ *
+ * Call this when a Mailbox is about to be closed after a successful sync.  If
+ * the folder qualifies, its Emails are moved into the cache and removed from
+ * the Mailbox, so mx_fastclose_mailbox() won't free them.
+ */
+void nm_folder_cache_park(struct Mailbox *m)
+{
+  if (!m || (m->type != MUTT_NOTMUCH))
+    return;
+
+  // Anything computed in the background before now is out of date
+  NmLocalGen++;
+
+  const char *url = mailbox_path(m);
+  nm_cache_drop(nm_cache_find(url));
+
+  struct NmMboxData *mdata = nm_mdata_get(m);
+  const long c_budget = cs_subset_long(NeoMutt->sub, "nm_folder_cache_messages");
+  if (!mdata || !m->visible || m->readonly || m->dontwrite || m->peekonly ||
+      (c_budget <= 0) || (mdata->query_type == NM_QUERY_TYPE_THREADS) ||
+      !m->emails || !nm_check_async_available())
+  {
+    return;
+  }
+
+  int keep = 0;
+  for (int i = 0; i < m->msg_count; i++)
+  {
+    const struct Email *e = m->emails[i];
+    if (e && !e->deleted && !e->quasi_deleted)
+      keep++;
+  }
+
+  if ((keep == 0) || (keep > c_budget))
+    return;
+
+  while ((nm_cache_total() + keep) > c_budget)
+  {
+    if (!nm_cache_evict_oldest())
+      break;
+  }
+
+  struct NmFolderCache *slot = NULL;
+  for (int i = 0; i < NM_CACHE_SLOTS; i++)
+  {
+    if (!NmCache[i].url)
+    {
+      slot = &NmCache[i];
+      break;
+    }
+  }
+
+  if (!slot)
+  {
+    nm_cache_evict_oldest();
+    for (int i = 0; i < NM_CACHE_SLOTS; i++)
+    {
+      if (!NmCache[i].url)
+      {
+        slot = &NmCache[i];
+        break;
+      }
+    }
+  }
+
+  if (!slot)
+    return;
+
+  struct Email **arr = MUTT_MEM_CALLOC(keep, struct Email *);
+  int k = 0;
+  for (int i = 0; i < m->msg_count; i++)
+  {
+    struct Email *e = m->emails[i];
+    if (!e)
+      continue;
+
+    if (e->deleted || e->quasi_deleted)
+    {
+      email_free(&m->emails[i]);
+      continue;
+    }
+
+    // The mailbox has just been synced, so nothing is outstanding
+    e->changed = false;
+    if (e->env)
+      e->env->changed = false;
+
+    arr[k++] = e;
+    m->emails[i] = NULL;
+  }
+
+  slot->url = mutt_str_dup(url);
+  slot->emails = arr;
+  slot->count = k;
+  slot->used = ++NmCacheClock;
+
+  mutt_debug(LL_DEBUG1, "nm: folder cache parked %s (%d emails, %ld total)\n",
+             url, k, nm_cache_total());
+}
+
+/**
+ * nm_cache_restore - Restore a folder's Emails from the cache
+ * @param m     Mailbox
+ * @param mdata Notmuch Mailbox data
+ * @retval true  The Mailbox was populated from the cache
+ * @retval false Nothing usable was cached
+ */
+static bool nm_cache_restore(struct Mailbox *m, struct NmMboxData *mdata)
+{
+  struct NmFolderCache *c = nm_cache_find(mailbox_path(m));
+  if (!c)
+    return false;
+
+  // Refresh the query settings; the cache only holds results of a 'messages' query
+  get_query_string(mdata, true);
+  if (!mdata->db_query || (mdata->query_type == NM_QUERY_TYPE_THREADS) ||
+      !nm_check_async_available())
+  {
+    nm_cache_drop(c);
+    return false;
+  }
+
+  mx_alloc_memory(m, c->count);
+  for (int i = 0; i < c->count; i++)
+  {
+    struct Email *e = c->emails[i];
+
+    // Forget everything the previous view knew about it
+    e->thread = NULL;
+    e->threaded = false;
+    e->collapsed = false;
+    e->display_subject = false;
+    e->subject_changed = false;
+    e->matched = false;
+    e->searched = false;
+    e->tagged = false;
+    e->limit_visited = false;
+    e->visible = true;
+    e->num_hidden = 0;
+    e->attr_color = NULL;
+    FREE(&e->tree);
+    e->index = i;
+
+    m->emails[i] = e;
+    mailbox_size_add(m, e);
+  }
+  m->msg_count = c->count;
+
+  mutt_debug(LL_DEBUG1, "nm: folder cache restored %s (%d emails)\n",
+             mailbox_path(m), c->count);
+
+  // The Emails are owned by the Mailbox again
+  FREE(&c->emails);
+  FREE(&c->url);
+  c->count = 0;
+  c->used = 0;
+
+  // Have the next check bring the folder up to date, and drop stale messages
+  mdata->reconcile = true;
+  mdata->mtime.tv_sec = 0;
+  mdata->mtime.tv_nsec = 0;
+  m->last_checked = 0;
+  return true;
+}
+
 /**
  * nm_mbox_open - Open a Mailbox - Implements MxOps::mbox_open() - @ingroup mx_mbox_open
  */
@@ -2109,6 +2382,14 @@ static enum MxOpenReturns nm_mbox_open(struct Mailbox *m)
   struct NmMboxData *mdata = nm_mdata_get(m);
   if (!mdata)
     return MX_OPEN_ERROR;
+
+  mdata->have_check_hash = false;
+
+  if (nm_cache_restore(m, mdata))
+  {
+    mdata->oldmsgcount = 0;
+    return MX_OPEN_OK;
+  }
 
   mutt_debug(LL_DEBUG1, "nm: reading messages...[current count=%d]\n", m->msg_count);
 
@@ -2143,6 +2424,476 @@ static enum MxOpenReturns nm_mbox_open(struct Mailbox *m)
 
   mutt_debug(LL_DEBUG1, "nm: reading messages... done [rc=%d, count=%d]\n", rc, m->msg_count);
   progress_free(&mdata->progress);
+  return rc;
+}
+
+/**
+ * email_by_msgid - Find an Email by its Notmuch message-id
+ * @param m  Mailbox
+ * @param id Notmuch message-id (without angle brackets)
+ * @retval ptr Email, or NULL
+ *
+ * A string-keyed variant of get_mutt_email(), for the non-blocking check.
+ */
+static struct Email *email_by_msgid(struct Mailbox *m, const char *id)
+{
+  if (!m || !id)
+    return NULL;
+
+  if (!m->id_hash)
+  {
+    m->id_hash = mutt_make_id_hash(m);
+    if (!m->id_hash)
+      return NULL;
+  }
+
+  char *mid = nm2mutt_message_id(id);
+  struct Email *e = mutt_hash_find(m->id_hash, mid);
+  FREE(&mid);
+  return e;
+}
+
+/**
+ * update_email_tags_str - Update an Email's tags from a pre-computed string
+ * @param e        Email
+ * @param tags_str Space-separated tag list (may be NULL)
+ * @retval 0 Tags changed
+ * @retval 1 Tags unchanged
+ *
+ * A string-based variant of update_email_tags() that performs no libnotmuch
+ * calls, for the non-blocking check.
+ */
+static int update_email_tags_str(struct Email *e, const char *tags_str)
+{
+  struct NmEmailData *edata = nm_edata_get(e);
+  if (!edata)
+    return 1;
+
+  struct Buffer *new_tags = buf_pool_get();
+  struct Buffer *old_tags = buf_pool_get();
+
+  if (tags_str)
+    buf_strcpy(new_tags, tags_str);
+
+  driver_tags_get(&e->tags, old_tags);
+
+  if (!buf_is_empty(new_tags) && !buf_is_empty(old_tags) && buf_str_equal(old_tags, new_tags))
+  {
+    buf_pool_release(&new_tags);
+    buf_pool_release(&old_tags);
+    return 1;
+  }
+  buf_pool_release(&old_tags);
+
+  driver_tags_replace(&e->tags, buf_string(new_tags));
+  buf_pool_release(&new_tags);
+  return 0;
+}
+
+/**
+ * append_message_data - Append a new Email from snapshot data
+ * @param hc    Header cache
+ * @param m     Mailbox
+ * @param path  Message filename
+ * @param msgid Notmuch message-id
+ * @param tags  Space-separated tag list
+ *
+ * A string-based variant of append_message() + init_email(): it parses the
+ * message from disk (or header cache) and performs no libnotmuch calls, for the
+ * non-blocking check.
+ */
+static void append_message_data(struct HeaderCache *hc, struct Mailbox *m,
+                                const char *path, const char *msgid, const char *tags)
+{
+  if (!path || !msgid)
+    return;
+
+  char *newpath = NULL;
+  struct Email *e = NULL;
+
+  mx_alloc_memory(m, m->msg_count);
+
+#ifdef USE_HCACHE
+  e = hcache_fetch_email(hc, path, mutt_str_len(path), 0).email;
+  if (e && (access(path, F_OK) != 0))
+    email_free(&e); // The file has moved; take the slow path to find it
+  if (!e)
+#endif
+  {
+    if (access(path, F_OK) == 0)
+    {
+      e = maildir_email_new();
+      if (!maildir_parse_message(path, false, e))
+        email_free(&e);
+    }
+    else
+    {
+      char *folder = get_folder_from_path(path);
+      if (folder)
+      {
+        FILE *fp = maildir_open_find_message(folder, path, &newpath);
+        if (fp)
+        {
+          e = maildir_email_new();
+          if (!maildir_parse_stream(fp, newpath, false, e))
+            email_free(&e);
+          mutt_file_fclose(&fp);
+        }
+      }
+      FREE(&folder);
+    }
+
+    if (!e)
+      goto done;
+
+#ifdef USE_HCACHE
+    hcache_store_email(hc, newpath ? newpath : path,
+                       mutt_str_len(newpath ? newpath : path), e, 0);
+#endif
+  }
+
+  /* init_email() equivalent, without a notmuch_message_t */
+  if (!nm_edata_get(e))
+  {
+    struct NmEmailData *edata = nm_edata_new();
+    e->nm_edata = edata;
+    edata->virtual_id = mutt_str_dup(msgid);
+
+    char *nm_msg_id = nm2mutt_message_id(msgid);
+    if (!e->env->message_id)
+    {
+      e->env->message_id = nm_msg_id;
+    }
+    else if (!mutt_str_equal(e->env->message_id, nm_msg_id))
+    {
+      FREE(&e->env->message_id);
+      e->env->message_id = nm_msg_id;
+    }
+    else
+    {
+      FREE(&nm_msg_id);
+    }
+
+    if (update_message_path_opt(e, newpath ? newpath : path, false) != 0)
+    {
+      email_free(&e);
+      goto done;
+    }
+
+    update_email_tags_str(e, tags);
+  }
+
+  e->active = true;
+  e->index = m->msg_count;
+  mailbox_size_add(m, e);
+  m->emails[m->msg_count] = e;
+  m->msg_count++;
+
+  if (newpath)
+  {
+    struct NmEmailData *edata = nm_edata_get(e);
+    if (edata)
+      edata->oldpath = mutt_str_dup(path);
+  }
+
+done:
+  FREE(&newpath);
+}
+
+/**
+ * nm_apply_check_snapshot - Apply a background enumeration to the Mailbox
+ * @param m    Mailbox
+ * @param snap Snapshot produced by the background worker
+ * @retval enum #MxStatus
+ *
+ * The main-thread half of the non-blocking check.  It mirrors nm_mbox_check()'s
+ * merge loop, but sources every message's filename and tags from @a snap
+ * instead of libnotmuch, so it costs no Xapian I/O.
+ */
+enum MxStatus nm_apply_check_snapshot(struct Mailbox *m, struct NmCheckSnapshot *snap)
+{
+  struct NmMboxData *mdata = nm_mdata_get(m);
+  if (!mdata || !snap || !snap->ok)
+    return MX_STATUS_OK;
+
+  /* Discard a snapshot taken before a local sync or tag commit: it doesn't
+   * reflect those changes and would revert them (e.g. read -> unread).  Reset
+   * the mtime so a fresh enumeration is dispatched on the next check. */
+  if (snap->gen != NmLocalGen)
+  {
+    mutt_debug(LL_DEBUG1, "nm: discarding stale async snapshot (gen %u != %u)\n",
+               snap->gen, NmLocalGen);
+    mdata->mtime.tv_sec = 0;
+    mdata->mtime.tv_nsec = 0;
+    return MX_STATUS_OK;
+  }
+
+  /* The vfolder's contents are the same as the last time they were applied, so
+   * there's nothing to merge (the DB changed, but not in a way that affects this
+   * query).  A folder restored from the cache must still be reconciled. */
+  if (!mdata->reconcile && mdata->have_check_hash && (mdata->check_hash == snap->hash))
+  {
+    mdata->mtime.tv_sec = snap->stamp - 1;
+    mdata->mtime.tv_nsec = 0;
+    mutt_debug(LL_DEBUG1, "nm: async check unchanged, skipping apply [count=%d]\n", m->msg_count);
+    return MX_STATUS_OK;
+  }
+
+  int new_flags = 0;
+  int stale = 0;
+  bool occult = false;
+
+  mdata->oldmsgcount = m->msg_count;
+
+  for (int i = 0; i < m->msg_count; i++)
+  {
+    struct Email *e = m->emails[i];
+    if (!e)
+      break;
+    e->active = false;
+  }
+
+  struct HeaderCache *hc = nm_hcache_open(m);
+
+  for (int i = 0; i < snap->nrecs; i++)
+  {
+    struct NmCheckRecord *r = &snap->recs[i];
+    if (!r->msgid)
+      continue;
+
+    struct Email *e = email_by_msgid(m, r->msgid);
+    if (!e)
+    {
+      append_message_data(hc, m, r->path, r->msgid, r->tags);
+      continue;
+    }
+
+    e->active = true;
+
+    if (r->path)
+    {
+      char old_file[PATH_MAX] = { 0 };
+      email_get_fullpath(e, old_file, sizeof(old_file));
+
+      /* For maildir-backed notmuch, the flags live in the filename suffix, so
+       * an unchanged filename means unchanged flags.  Only re-parse when the
+       * path actually changed - this avoids 40k+ throwaway parses per check. */
+      if (!mutt_str_equal(old_file, r->path))
+      {
+        /* The snapshot can be older than a local <sync-mailbox>, which renames
+         * the file to carry the new flags.  If the recorded file no longer
+         * exists, this record is stale: applying its flags or tags would undo
+         * local changes. */
+        if (access(r->path, F_OK) != 0)
+        {
+          mutt_debug(LL_DEBUG2, "nm: stale snapshot path, skipping: %s\n", r->path);
+          stale++;
+          continue;
+        }
+
+        update_message_path(e, r->path);
+
+        if (!e->changed)
+        {
+          struct Email *e_tmp = maildir_email_new();
+          maildir_parse_flags(e_tmp, r->path);
+          e_tmp->old = e->old;
+          maildir_update_flags(m, e, e_tmp);
+          email_free(&e_tmp);
+        }
+      }
+    }
+
+    if (update_email_tags_str(e, r->tags) == 0)
+      new_flags++;
+  }
+
+  nm_hcache_close(&hc);
+
+  for (int i = 0; i < m->msg_count; i++)
+  {
+    struct Email *e = m->emails[i];
+    if (!e)
+      break;
+    if (!e->active)
+    {
+      occult = true;
+      break;
+    }
+  }
+
+  /* A folder restored from the cache may hold messages that have since left the
+   * query (archived, retagged, deleted).  A real open would never show those,
+   * so drop them now.  Messages with unsynced local changes are kept. */
+  int removed = 0;
+  if (mdata->reconcile)
+  {
+    mdata->reconcile = false;
+    if (occult)
+    {
+      mutt_hash_free(&m->subj_hash);
+      mutt_hash_free(&m->id_hash);
+
+      const int count = m->msg_count;
+      int j = 0;
+      for (int i = 0; i < count; i++)
+      {
+        struct Email *e = m->emails[i];
+        if (!e)
+          continue;
+
+        if (e->active || e->changed)
+        {
+          if (i != j)
+          {
+            m->emails[j] = e;
+            m->emails[i] = NULL;
+          }
+          e->index = j++;
+        }
+        else
+        {
+          mailbox_size_sub(m, e);
+          mutt_label_hash_remove(m, e);
+          mailbox_gc_add(e);
+          m->emails[i] = NULL;
+          removed++;
+        }
+      }
+      m->msg_count = j;
+      occult = (removed > 0);
+    }
+  }
+
+  if ((m->msg_count > mdata->oldmsgcount) || (removed > 0))
+    mailbox_changed(m, NT_MAILBOX_INVALID);
+
+  /* Record when the snapshot was taken, not now: DB changes made while the
+   * enumeration ran must still trigger another check.  Back off one second as
+   * the DB mtime has 1s granularity. */
+  mdata->mtime.tv_sec = snap->stamp - 1;
+  mdata->mtime.tv_nsec = 0;
+  mdata->check_hash = snap->hash;
+  mdata->have_check_hash = true;
+
+  mutt_debug(LL_DEBUG1,
+             "nm: async check applied [count=%d, new_flags=%d, occult=%d, stale=%d, removed=%d]\n",
+             m->msg_count, new_flags, occult, stale, removed);
+
+  if (occult)
+    return MX_STATUS_REOPENED;
+  if (m->msg_count > mdata->oldmsgcount)
+    return MX_STATUS_NEW_MAIL;
+  if (new_flags)
+    return MX_STATUS_FLAGS;
+  return MX_STATUS_OK;
+}
+
+/**
+ * nm_check_dispatch - Snapshot the mailbox's query and queue a background check
+ * @param m Mailbox
+ *
+ * Runs on the main thread; reads config and the mailbox URL, then hands a
+ * plain-data job to the worker.
+ */
+static void nm_check_dispatch(struct Mailbox *m)
+{
+  struct NmMboxData *mdata = nm_mdata_get(m);
+  if (!mdata)
+    return;
+
+  char *qstr = get_query_string(mdata, true);
+  if (!qstr)
+    return;
+
+  struct NmCheckJob job = { 0 };
+  job.mbox_id = m;
+  job.gen = NmLocalGen;
+  job.stamp = mutt_date_now();
+  job.db_query = mutt_str_dup(qstr);
+  job.limit = get_limit(mdata);
+
+  const char *fname = nm_db_get_filename(m);
+  job.db_filename = fname ? mutt_str_dup(fname) : NULL;
+
+  const char *const c_nm_exclude_tags = cs_subset_string(NeoMutt->sub, "nm_exclude_tags");
+  if (c_nm_exclude_tags)
+  {
+    struct NmTags tags = nm_tag_str_to_tags(c_nm_exclude_tags);
+    int nt = ARRAY_SIZE(&tags.tags);
+    job.exclude_tags = mutt_mem_calloc(nt + 1, sizeof(char *));
+    const char **tp = NULL;
+    int j = 0;
+    ARRAY_FOREACH(tp, &tags.tags)
+    {
+      job.exclude_tags[j++] = mutt_str_dup(*tp);
+    }
+    job.exclude_tags[j] = NULL;
+    nm_tag_array_free(&tags);
+  }
+
+  job.open_timeout = cs_subset_number(NeoMutt->sub, "nm_open_timeout");
+#if LIBNOTMUCH_CHECK_VERSION(5, 4, 0)
+  const char *cfp = cs_subset_string(NeoMutt->sub, "nm_config_profile");
+  job.cfg_profile = cfp ? mutt_str_dup(cfp) : NULL;
+
+  const char *ncf = cs_subset_path(NeoMutt->sub, "nm_config_file");
+  const char *use = NULL;
+  if (!ncf)
+    use = "";
+  else if (!mutt_strn_equal(ncf, "auto", 4))
+    use = ncf;
+  job.cfg_file = use ? mutt_str_dup(use) : NULL;
+#endif
+
+  if (!nm_check_async_submit(&job))
+    nm_check_job_free(&job);
+}
+
+/**
+ * nm_check_nonblocking - Non-blocking check for the open Notmuch mailbox
+ * @param m Mailbox
+ * @retval enum #MxStatus
+ *
+ * Applies any ready background snapshot, then (if the database has changed and
+ * no work is in flight) kicks off a fresh enumeration.  It never runs the query
+ * itself, so it always returns quickly.
+ */
+enum MxStatus nm_check_nonblocking(struct Mailbox *m)
+{
+  if (!m)
+    return MX_STATUS_ERROR;
+
+  struct NmMboxData *mdata = nm_mdata_get(m);
+  if (!mdata)
+    return MX_STATUS_ERROR;
+
+  enum MxStatus rc = MX_STATUS_OK;
+
+  struct NmCheckSnapshot *snap = nm_check_async_collect();
+  if (snap)
+  {
+    if (snap->mbox_id == m)
+      rc = nm_apply_check_snapshot(m, snap);
+    nm_check_snapshot_free(&snap);
+  }
+
+  /* Throttle new background enumerations to $mail_check, mirroring
+   * mx_mbox_check().  Ready results (above) are always applied promptly; only
+   * the (backgrounded) re-scan is rate-limited. */
+  const short c_mail_check = cs_subset_number(NeoMutt->sub, "mail_check");
+  const time_t now = mutt_date_now();
+  if ((now - m->last_checked) < c_mail_check)
+    return rc;
+  m->last_checked = now;
+
+  time_t mtime = 0;
+  if (!nm_check_async_busy() && (nm_db_get_mtime(m, &mtime) == 0) &&
+      (mdata->mtime.tv_sec < mtime))
+  {
+    nm_check_dispatch(m);
+  }
+
   return rc;
 }
 
@@ -2298,6 +3049,8 @@ static enum MxStatus nm_mbox_sync(struct Mailbox *m)
   struct Progress *progress = NULL;
   char *url = mutt_str_dup(mailbox_path(m));
   bool changed = false;
+
+  NmLocalGen++; // invalidate any in-flight background snapshot
 
   mutt_debug(LL_DEBUG1, "nm: sync start\n");
 
@@ -2506,6 +3259,7 @@ static int nm_tags_commit(struct Mailbox *m, struct Email *e, const char *buf)
     goto done;
 
   mutt_debug(LL_DEBUG1, "nm: tags modify: '%s'\n", buf);
+  NmLocalGen++; // invalidate any in-flight background snapshot
 
   update_tags(msg, buf);
   update_email_flags(m, e, buf);

@@ -108,6 +108,8 @@ static bool notmuch_cleanup(struct NeoMutt *n, void *data)
   struct NotmuchModuleData *mod_data = data;
 
   nm_stats_async_shutdown();
+  nm_check_async_shutdown();
+  nm_folder_cache_shutdown();
 
   notify_free(&mod_data->notify);
 
